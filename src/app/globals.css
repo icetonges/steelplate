@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --font-display: "Fraunces"; --font-body: "Inter"; }
+
+body {
+  background: #1b1f24;
+  color: #e9e4d8;
+  font-family: var(--font-body), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* subtle forged-metal texture on the hero, kept restrained */
+.forge-rule { height: 1px; background: linear-gradient(90deg, transparent, #5b6673, transparent); }
