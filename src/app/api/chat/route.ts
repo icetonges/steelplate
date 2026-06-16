@@ -1,23 +1,11 @@
 /**
- * THE MENTOR ROUTE — where a parent's message meets the brain, run as a
+ * THE MENTOR ROUTE — a parent's message meets the brain, run as a
  * draft → critic → revise/escalate loop over the Gemini → Groq → Claude chain.
  *
- * Flow on each turn:
- *   1. Load the live Snapshot for the child + retrieve grounding context (RAG).
- *   2. DRAFT: answer on the cheapest brain tier (Gemini), with a read-only
- *      history-search tool and the snapshot-update tool. Claude is NOT used here.
- *   3. CRITIQUE: a cheap second agent scores the draft against the steelplate
- *      principles (the same intent encoded in the system prompt).
- *   4a. If it passes → stream the draft back as-is. (Cheapest path: 2 cheap calls.)
- *   4b. If it fails → REVISE: re-answer with the critic's specific objections,
- *       escalating one rung up the chain (Groq, then Claude as the backstop).
- *       Unsafe drafts escalate straight to the strongest tier.
- *   5. Persist the parent's message as a check-in (embedded for future RAG).
- *
- * The chosen model is surfaced in the `x-steelplate-brain` response header.
- *
- * Production note: gate this route behind auth (see README). It handles
- * sensitive information about a child — single-tenant, private, locked to you.
+ * Resilience: the parent's check-in is saved first and independently; retrieval
+ * (which needs an embedding call) is wrapped so a failure degrades to "no
+ * grounding" instead of killing the turn; and any model failure returns a
+ * visible assistant message rather than a silent error.
  */
 
 import {
@@ -38,24 +26,53 @@ import { recordCheckIn } from "@/lib/store";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+/** Emit a fixed assistant message as a valid data stream (no model call). */
+function streamMessage(text: string, brain: string) {
+  return createDataStreamResponse({
+    headers: { "x-steelplate-brain": brain },
+    execute: (writer) => {
+      writer.write(formatDataStreamPart("text", text));
+      writer.write(
+        formatDataStreamPart("finish_message", {
+          finishReason: "stop",
+          usage: { promptTokens: 0, completionTokens: 0 },
+        })
+      );
+    },
+  });
+}
+
 export async function POST(req: Request) {
   const { messages, childId } = (await req.json()) as {
     messages: CoreMessage[];
     childId?: string;
   };
 
-  if (!childId) {
-    return new Response("Missing childId", { status: 400 });
-  }
+  if (!childId) return new Response("Missing childId", { status: 400 });
 
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  const query =
-    typeof lastUser?.content === "string" ? lastUser.content : "";
+  const query = typeof lastUser?.content === "string" ? lastUser.content : "";
 
-  // 1: live snapshot + grounding context (parallel)
+  // 1: save the parent's check-in first, reliably (independent of model/RAG).
+  if (query) {
+    try {
+      await recordCheckIn(childId, query, "daily");
+    } catch (err) {
+      console.error("[chat] check-in save failed:", err);
+    }
+  }
+
+  // 2: snapshot + grounding. Each degrades on its own so one failure (e.g. an
+  // embedding error) can't take down the turn.
   const [snapshotText, retrieved] = await Promise.all([
-    loadSnapshotText(childId),
-    retrieve(query, { childId, limit: 8 }),
+    loadSnapshotText(childId).catch((e) => {
+      console.error("[chat] snapshot load failed:", e);
+      return null;
+    }),
+    retrieve(query, { childId, limit: 8 }).catch((e) => {
+      console.error("[chat] retrieval failed, continuing without grounding:", e);
+      return [];
+    }),
   ]);
 
   const baseSystem = buildSystemPrompt({
@@ -63,11 +80,6 @@ export async function POST(req: Request) {
     retrievedContext: formatContext(retrieved),
   });
 
-  // Persist the parent's message for future retrieval (fire-and-forget).
-  if (query) void recordCheckIn(childId, query, "daily");
-
-  // Tools. search_history is read-only (safe to run on any pass); update_snapshot
-  // writes, so it's offered only on the draft pass to avoid double-writes on revise.
   const searchTool = tool({
     description:
       "Search deeper into stored history (check-ins, diary, documents, news, research) when the snapshot and current context are not enough. Use sparingly.",
@@ -78,8 +90,12 @@ export async function POST(req: Request) {
         .optional(),
     }),
     execute: async ({ query, sources }) => {
-      const hits = await retrieve(query, { childId, limit: 6, sources });
-      return formatContext(hits) || "Nothing relevant found.";
+      try {
+        const hits = await retrieve(query, { childId, limit: 6, sources });
+        return formatContext(hits) || "Nothing relevant found.";
+      } catch {
+        return "History search is temporarily unavailable.";
+      }
     },
   });
 
@@ -101,7 +117,7 @@ export async function POST(req: Request) {
     },
   });
 
-  // 2: DRAFT on the cheapest tier (Gemini). Has both tools.
+  // 3: DRAFT on the cheapest tier. If every tier fails, show why.
   let draft;
   try {
     draft = await generateWithChain({
@@ -112,37 +128,26 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     console.error("[chat] draft failed across all tiers:", err);
-    return new Response(
-      "The mentor is unavailable — no model tier is configured. Set GOOGLE_GENERATIVE_AI_API_KEY, GROQ_API_KEY, or ANTHROPIC_API_KEY.",
-      { status: 503 }
+    return streamMessage(
+      "I couldn't reach any model just now. Check that a brain key is set and valid " +
+        "(GOOGLE_GENERATIVE_AI_API_KEY, GROQ_API_KEY, or ANTHROPIC_API_KEY), then try again.",
+      "none:error"
     );
   }
 
-  // 3: CRITIQUE the draft against the steelplate principles.
+  // 4: CRITIQUE the draft against the steelplate principles.
   const verdict = await critiqueReply({
     parentMessage: query,
     snapshotText,
     draftText: draft.text,
   });
 
-  // 4a: PASS — stream the draft back unchanged. No extra model call.
+  // 4a: PASS — stream the draft back unchanged (no extra model call).
   if (verdict.pass) {
-    return createDataStreamResponse({
-      headers: { "x-steelplate-brain": `${draft.tier.name}:approved` },
-      execute: (writer) => {
-        writer.write(formatDataStreamPart("text", draft!.text));
-        writer.write(
-          formatDataStreamPart("finish_message", {
-            finishReason: "stop",
-            usage: { promptTokens: 0, completionTokens: 0 },
-          })
-        );
-      },
-    });
+    return streamMessage(draft.text, `${draft.tier.name}:approved`);
   }
 
-  // 4b: FAIL — revise with escalation. Unsafe drafts jump to the strongest tier;
-  // otherwise step one rung above whichever tier produced the draft.
+  // 4b: FAIL — revise with escalation. Unsafe jumps to the strongest tier.
   const escalateTo =
     verdict.severity === "unsafe"
       ? BRAIN_CHAIN.length - 1
@@ -159,26 +164,13 @@ export async function POST(req: Request) {
     revised = await streamWithChain({
       system: reviseSystem,
       messages,
-      // Read-only tool only on revise (update already ran during draft if needed).
       tools: { search_history: searchTool },
       temperature: 0.6,
       startTier: escalateTo,
     });
   } catch (err) {
-    console.error("[chat] revise failed; falling back to draft text:", err);
-    // Last resort: ship the draft rather than erroring on the parent.
-    return createDataStreamResponse({
-      headers: { "x-steelplate-brain": `${draft.tier.name}:fallback` },
-      execute: (writer) => {
-        writer.write(formatDataStreamPart("text", draft!.text));
-        writer.write(
-          formatDataStreamPart("finish_message", {
-            finishReason: "stop",
-            usage: { promptTokens: 0, completionTokens: 0 },
-          })
-        );
-      },
-    });
+    console.error("[chat] revise failed; shipping the draft:", err);
+    return streamMessage(draft.text, `${draft.tier.name}:fallback`);
   }
 
   return revised.result.toDataStreamResponse({

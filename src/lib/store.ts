@@ -7,8 +7,15 @@ import { checkIns, documents } from "./db/schema";
 import { embedText } from "./embeddings";
 
 export async function recordCheckIn(childId: string, body: string, cadence = "daily") {
+  // Save the check-in row first so it's never lost, then embed for retrieval.
+  // If embedding fails, the check-in still persists (it just won't be retrievable
+  // until re-embedded).
   await db.insert(checkIns).values({ childId, body, cadence });
-  await storeChunk({ childId, source: "check_in", chunk: body });
+  try {
+    await storeChunk({ childId, source: "check_in", chunk: body });
+  } catch (err) {
+    console.warn("[store] check-in embed failed (row saved, not retrievable):", err);
+  }
 }
 
 export async function storeChunk(opts: {
