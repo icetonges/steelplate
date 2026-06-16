@@ -1,14 +1,13 @@
 "use client";
 
 import { useChat } from "ai/react";
-
-// Single-tenant scaffold: replace with the real child id after seeding.
-const CHILD_ID = process.env.NEXT_PUBLIC_CHILD_ID ?? "";
+import { useChild } from "@/components/app-shell";
 
 export function Chat() {
+  const { child } = useChild();
   const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
     api: "/api/chat",
-    body: { childId: CHILD_ID },
+    body: { childId: child.id },
   });
 
   return (

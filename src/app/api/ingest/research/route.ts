@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  const { title, url, body } = await req.json();
+  const { childId, title, url, body } = await req.json();
   if (!body) return new Response("Missing body", { status: 400 });
 
   const { text } = await generateText({
@@ -22,8 +22,16 @@ export async function POST(req: Request) {
       `Be faithful; note the strength of evidence.\n\nTITLE: ${title}\n\n${body}`,
   });
 
+  let chunks = 0;
   for (const c of chunk(text)) {
-    await storeChunk({ source: "research", title, chunk: c, meta: { url } });
+    await storeChunk({
+      childId: childId ?? undefined,
+      source: "research",
+      title,
+      chunk: c,
+      meta: { url },
+    });
+    chunks++;
   }
-  return Response.json({ ok: true });
+  return Response.json({ ok: true, summary: text, chunks });
 }

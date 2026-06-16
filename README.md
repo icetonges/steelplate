@@ -59,16 +59,30 @@ CRITIC agent  ── scores draft against MENTOR_PRINCIPLES (same intent as the 
   `/api/documents/upload` (Blob → parse → chunk → embed). All currently stubbed at
   the source/parse step — wire your feeds and a PDF/docx parser.
 
+## Front end (everything is editable from the UI)
+
+Five screens, gated behind first-run onboarding that creates the child profile:
+
+- **Mentor** (`/`) — the chat, running the draft→critic→revise chain.
+- **Diary** (`/diary`) — write reflections; each is embedded for retrieval.
+- **Knowledge** (`/knowledge`) — upload documents and paste/distill research.
+- **Snapshot** (`/snapshot`) — view AND edit the living state: profile fields,
+  strengths, growth edges, relationships, leadership, courage, watch-list,
+  graduated items, and experiments. This is the self-evolving state, by hand.
+- **History** (`/history`) — semantic search over everything stored, plus recent
+  check-ins.
+
 ## What's done vs. what's stubbed
 
-Done and coherent: the brain prompt, model routing, schema + SQL migration, RAG
-retrieval, the streaming chat route with snapshot-update tool calling, snapshot
-assembly/versioning, the embed-and-store pipeline, UI shell, config.
+Done: the brain chain + critic loop, model catalog, schema + SQL migration, RAG
+retrieval, the full front end above with its API routes (child, snapshot, traits,
+experiments, diary, documents, check-ins, search), snapshot versioning, and the
+embed-and-store pipeline.
 
-Stubbed (clearly marked `TODO`): real news feeds, a PDF/docx parser for uploads,
-auth. **Add auth before this holds anything real** — it stores sensitive
-information about a child. Keep it single-tenant and private (Clerk or Auth.js,
-gate every route).
+Stubbed (`TODO`): the daily news-feed source, a PDF/DOCX text extractor for
+uploads (text formats work today), and **auth**. **Add auth before this holds
+anything real** — it stores sensitive information about a child. Keep it
+single-tenant and private (Clerk or Auth.js, gate every route).
 
 ## Setup
 
@@ -81,9 +95,8 @@ gate every route).
    optional. For **local dev / migrations**, run `vercel env pull .env.local`.
    At minimum set one brain tier (`GOOGLE_GENERATIVE_AI_API_KEY` recommended — it
    also powers embeddings, the critic, and ingestion), plus `DATABASE_URL`.
-4. Seed the first child: edit `scripts/seed.ts`, run `npx tsx scripts/seed.ts`,
-   put the printed id into `NEXT_PUBLIC_CHILD_ID`.
-5. `npm run dev`
+4. `npm run dev` — on first load the app shows an onboarding screen; create the
+   child profile there. No seed script or `NEXT_PUBLIC_CHILD_ID` needed.
 
 ## Move it to your machine + open in Cowork
 
