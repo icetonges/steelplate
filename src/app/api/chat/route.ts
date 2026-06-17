@@ -1,22 +1,27 @@
 /**
- * THE MENTOR ROUTE — a parent's message meets the brain, run as a
- * draft → critic → revise/escalate loop over the Gemini → Groq → Claude chain.
+ * THE MENTOR ROUTE.
  *
- * Resilience: the parent's check-in is saved first and independently; retrieval
- * (which needs an embedding call) is wrapped so a failure degrades to "no
- * grounding" instead of killing the turn; and any model failure returns a
- * visible assistant message rather than a silent error.
+ * Two modes, chosen by the `modelId` field from the UI dropdown:
+ *   - No modelId ("Auto") → the full draft → critic → revise/escalate loop over
+ *     the Gemini → Groq → Claude chain.
+ *   - A specific modelId → answer directly with that one model (no chain
+ *     fallback, no critic) so you see exactly what that model produces.
+ *
+ * Either way the parent's check-in is saved first and independently, retrieval
+ * degrades gracefully, and model failures return a visible message.
  */
 
 import {
   tool,
+  streamText,
   createDataStreamResponse,
   formatDataStreamPart,
   type CoreMessage,
 } from "ai";
 import { z } from "zod";
 import { generateWithChain, streamWithChain } from "@/lib/brain";
-import { BRAIN_CHAIN } from "@/lib/models";
+import { BRAIN_CHAIN, modelById } from "@/lib/models";
+import { getModel, type ModelId } from "@/lib/model-catalog";
 import { buildSystemPrompt, buildRevisePrompt } from "@/lib/prompts/mentor";
 import { critiqueReply } from "@/lib/critic";
 import { retrieve, formatContext } from "@/lib/rag";
@@ -26,7 +31,6 @@ import { recordCheckIn } from "@/lib/store";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-/** Emit a fixed assistant message as a valid data stream (no model call). */
 function streamMessage(text: string, brain: string) {
   return createDataStreamResponse({
     headers: { "x-steelplate-brain": brain },
@@ -43,9 +47,10 @@ function streamMessage(text: string, brain: string) {
 }
 
 export async function POST(req: Request) {
-  const { messages, childId } = (await req.json()) as {
+  const { messages, childId, modelId } = (await req.json()) as {
     messages: CoreMessage[];
     childId?: string;
+    modelId?: string;
   };
 
   if (!childId) return new Response("Missing childId", { status: 400 });
@@ -53,7 +58,6 @@ export async function POST(req: Request) {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const query = typeof lastUser?.content === "string" ? lastUser.content : "";
 
-  // 1: save the parent's check-in first, reliably (independent of model/RAG).
   if (query) {
     try {
       await recordCheckIn(childId, query, "daily");
@@ -62,8 +66,6 @@ export async function POST(req: Request) {
     }
   }
 
-  // 2: snapshot + grounding. Each degrades on its own so one failure (e.g. an
-  // embedding error) can't take down the turn.
   const [snapshotText, retrieved] = await Promise.all([
     loadSnapshotText(childId).catch((e) => {
       console.error("[chat] snapshot load failed:", e);
@@ -117,7 +119,34 @@ export async function POST(req: Request) {
     },
   });
 
-  // 3: DRAFT on the cheapest tier. If every tier fails, show why.
+  // DIRECT MODE — a specific model was chosen in the dropdown.
+  if (modelId) {
+    if (!getModel(modelId as ModelId)) {
+      return streamMessage(`Unknown model: ${modelId}.`, `${modelId}:error`);
+    }
+    try {
+      const result = streamText({
+        model: modelById(modelId as ModelId),
+        system: baseSystem,
+        messages,
+        temperature: 0.7,
+        tools: { search_history: searchTool },
+        maxSteps: 4,
+        onError: (e) => console.warn(`[chat] direct model ${modelId} error:`, e),
+      });
+      return result.toDataStreamResponse({
+        headers: { "x-steelplate-brain": `${modelId}:direct` },
+      });
+    } catch (err) {
+      console.error(`[chat] direct model ${modelId} failed:`, err);
+      return streamMessage(
+        `Couldn't run ${modelId}. Check that its provider key is set and valid.`,
+        `${modelId}:error`
+      );
+    }
+  }
+
+  // AUTO MODE — draft on the cheapest tier.
   let draft;
   try {
     draft = await generateWithChain({
@@ -135,19 +164,16 @@ export async function POST(req: Request) {
     );
   }
 
-  // 4: CRITIQUE the draft against the steelplate principles.
   const verdict = await critiqueReply({
     parentMessage: query,
     snapshotText,
     draftText: draft.text,
   });
 
-  // 4a: PASS — stream the draft back unchanged (no extra model call).
   if (verdict.pass) {
     return streamMessage(draft.text, `${draft.tier.name}:approved`);
   }
 
-  // 4b: FAIL — revise with escalation. Unsafe jumps to the strongest tier.
   const escalateTo =
     verdict.severity === "unsafe"
       ? BRAIN_CHAIN.length - 1

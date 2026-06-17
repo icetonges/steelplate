@@ -1,4 +1,4 @@
-import { Chat } from "@/components/chat";
+import { Mentor } from "@/components/mentor";
 
 export default function Home() {
   return (
@@ -9,7 +9,7 @@ export default function Home() {
         follow up on what you tried, and re-baseline as your child grows.
       </p>
       <div className="forge-rule mb-6" />
-      <Chat />
+      <Mentor />
     </div>
   );
 }

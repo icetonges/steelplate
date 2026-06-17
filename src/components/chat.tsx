@@ -1,17 +1,30 @@
 "use client";
 
 import { useChat } from "ai/react";
+import { useState } from "react";
 import { useChild } from "@/components/app-shell";
+import { ModelSelect } from "@/components/model-select";
 
 export function Chat() {
   const { child } = useChild();
+  const [modelId, setModelId] = useState(""); // "" = Auto (chain + critic)
   const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
     api: "/api/chat",
     body: { childId: child.id },
   });
 
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    handleSubmit(e, { body: { childId: child.id, modelId: modelId || undefined } });
+  }
+
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-steel uppercase tracking-wide">Model</span>
+        <ModelSelect value={modelId} onChange={setModelId} includeAuto />
+      </div>
+
       <div className="flex flex-col gap-4 min-h-[40vh]">
         {messages.length === 0 && (
           <p className="text-steel italic">
@@ -32,7 +45,7 @@ export function Chat() {
         ))}
       </div>
 
-      <form onSubmit={handleSubmit} className="sticky bottom-4 flex gap-2">
+      <form onSubmit={onSubmit} className="sticky bottom-4 flex gap-2">
         <input
           value={input}
           onChange={handleInputChange}
